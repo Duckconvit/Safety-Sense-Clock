@@ -1,0 +1,30 @@
+=========== TÓM TẮT CÁC CHỨC NĂNG ========
+    Chức năng chính:
+	    Đo nhiệt độ, độ ẩm
+      Đo chất lượng không khí
+      Hiển thị ngày, giờ
+      Cảnh báo nếu nhiệt độ hoặc không khí quá mức
+    Các chức năng phụ:
+      Báo thức
+      Thay đổi ngưỡng nhiệt độ, không khí
+      Thay đổi giờ, ngày,…
+      Tắt led sau 10 giây khi không có cảnh báo, âm thanh 
+      Các nút di chuyển trên màn hình, tùy chỉnh giá trị
+
+============ HƯỚNG DẪN SỬ DỤNG ============
+    Có 4 nút lần lượt từ trái qua phải:
+    Nút thứ 1:  di chuyển con trỏ sang trái   
+    Nút thứ 2:  di chuyển con trỏ sang phải
+    Nút thứ 3:  + Khi nhấn: Tăng 1 giá trị tại con trỏ
+                + Khi giữ:  Giảm giá trị tại con trỏ
+  
+    Nút thứ 4:  + Khi giữ thả trong 1 giây: Tắt, bật báo thức (có hiển thị ở lcd)
+                + Khi nhấn:  .Tắt báo thức (loa)
+                             .Tắt loa và led khi đang cảnh báo quá ngưỡng
+                             .Thoát con trỏ khi đang trỏ
+                             .Tạm mute tất cả
+
+============== Một số lưu ý khác =============
+    +Led sẽ tự động tắt sau 10s khi không có âm thanh, nhiệt độ, không khí vượt ngưỡng hay báo thức
+    +Khi led tắt, có thể bật led bằng phát ra âm thanh hoặc nhấn nút trái/phải
+    +Khi con trỏ trỏ vào giá trị gas, nhiệt độ thì nó sẽ hiển thị giá trị ngưỡng để ta chỉnh
