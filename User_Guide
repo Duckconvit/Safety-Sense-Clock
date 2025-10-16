@@ -28,3 +28,38 @@
     +Led sẽ tự động tắt sau 10s khi không có âm thanh, nhiệt độ, không khí vượt ngưỡng hay báo thức
     +Khi led tắt, có thể bật led bằng phát ra âm thanh hoặc nhấn nút trái/phải
     +Khi con trỏ trỏ vào giá trị gas, nhiệt độ thì nó sẽ hiển thị giá trị ngưỡng để ta chỉnh
+
+=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/=/
+
+=========== FUNCTION SUMMARY ========
+    Main functions:
+	  Measure temperature and humidity
+      Measure air quality
+      Display date and time
+      Alert when temperature or air quality exceeds the threshold
+    Additional functions:
+      Alarm clock
+      Adjustable temperature and air quality thresholds
+      Adjustable date and time
+      Auto turn-off LED after 10 seconds of inactivity (no alert or sound)
+      Navigate and adjust values using buttons
+
+============ USER GUIDE ============
+    There are 4 buttons from left to right:
+    Button 1:  Move the cursor to the left   
+    Button 2:  Move the cursor to the right
+    Button 3:   + Short press: Increase the selected value by 1 unit
+                + Hold:        Decrease the selected value
+  
+    Button 4:   + Hold for 1 second: Turn ON/OFF the alarm (shown on LCD)
+                + Short press:   .Stop the alarm (buzzer)
+                                 .Turn off buzzer and LEDs during over-threshold alert
+                                 .Exit edit mode when cursor is active
+                                 .Temporarily mute all alerts
+
+============== Other Notes =============
+    +The LED will automatically turn off after 10s if there is no sound, temperature, air, or alarm alert
+    +When the LED is off, it can be reactivated by making a sound or pressing the left/right button
+    +When the cursor is on temperature or gas values, it will display the threshold value for easy adjustment
+
+
