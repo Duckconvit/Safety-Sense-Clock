@@ -1,0 +1,583 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+LiquidCrystal_I2C lcd(0x27, 20, 4);
+
+#include "DHT.h"
+
+// ====== MQ135 ======
+#define PIN_MQ135 A2
+
+// ====== DHT11 ======
+#define DHTPIN 2
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+
+// ====== Sound sensor ======
+#define SOUND_SENSOR 10
+#define LED_SOUND    7
+
+// ====== Buttons ======
+#define BTN_LEFT   4   // D4: next field (left->right, top->down)
+#define BTN_RIGHT  3   // D3: prev field (right->left, bottom->up)
+#define BTN_ADJ    9   // D9: click = increase, hold = repeated decrease
+#define BTN_ALARM_STOP 11 // hold >= HOLD_TIME: toggle alarm; short: stop alarm/mute alerts/exit select
+
+const unsigned long HOLD_TIME   = 1000;
+const unsigned long REPEAT_MS   = 200;
+
+// ====== Temp threshold ======
+float nguongNhiet = 40.0;
+const float NGUONG_NHIET_MIN = 20.0;
+const float NGUONG_NHIET_MAX = 60.0;
+const float NGUONG_NHIET_STEP = 1.0;
+
+// ====== Gas threshold ======
+float nguongGas = 900.0;
+const float NGUONG_GAS_MIN = 50.0;
+const float NGUONG_GAS_MAX = 1000.0;
+const float NGUONG_GAS_STEP = 5.0;
+
+// ====== Alert LEDs ======
+#define LED_TEMP 5
+#define LED_GAS  6
+
+// ====== Buzzer (active) ======
+#define BUZZER 8
+
+// ====== Clock ======
+unsigned long prevSecTick = 0;
+const unsigned long CLOCK_SPEED = 1000;
+int giay = 55, phut = 0, gio = 0;
+int ngay = 10, thang = 10, nam = 2025;
+
+// ====== Alarm ======
+int  alarmGio = 0, alarmPhut = 0;
+bool alarmEnabled = false;
+bool alarmRinging = false;
+
+// ====== Cached values for LCD ======
+float lastTemp = -999;
+float lastHum  = -999;
+float lastPpm  = -999;
+int   lastSound = -1;
+
+// ====== Timing ======
+unsigned long lastSensorRead = 0;
+const unsigned long SENSOR_INTERVAL = 500;
+
+// Blink timers (UI vs LED independent)
+unsigned long lastUIBlinkToggle  = 0;
+unsigned long lastLEDBlinkToggle = 0;
+bool blinkOn = true;
+bool ledBlinkOn = false;
+
+// Auto exit select
+unsigned long lastInteractionMs = 0;
+const unsigned long SELECT_TIMEOUT = 10000; // 10 s
+
+// ====== Mute for sensor alerts ======
+bool alertMuted = false;
+unsigned long alertMuteUntil = 0;
+const unsigned long ALERT_MUTE_MS = 60000; // 60 s
+
+// ====== LCD auto-off (display+backlight) ======
+bool lcdOn = true;
+unsigned long lastLcdActivity = 0;
+const unsigned long LCD_TIMEOUT = 15000; // 15 s
+
+// ====== Selectable fields ======
+enum Field {
+  F_CLK_H = 0,  // HH (0,0)
+  F_CLK_M,      // MM (3,0)
+  F_CLK_S,      // SS (6,0)
+  F_DATE_D,     // DD (10,0)
+  F_DATE_M,     // MM (13,0)
+  F_DATE_Y,     // YYYY (16,0)
+  F_THR,        // Temp threshold (3,1)
+  F_GTH,        // Gas threshold (4,2)
+  F_ALM_H,      // Alarm HH (6,3)
+  F_ALM_M,      // Alarm MM (9,3)
+  F_COUNT
+};
+
+int selected = -1;
+int lastSelected = -1;        // track selection changes
+bool forceRedrawGas = false;  // force ppm redraw when leaving/entering F_GTH
+
+// Button states
+bool prevLeft = HIGH, prevRight = HIGH, prevAdj = HIGH, prevStop = HIGH;
+unsigned long pressStartAdj = 0, lastRepeatAdj = 0;
+bool isHoldingAdj = false;
+
+unsigned long pressStartStop = 0;
+bool stopPressedTracking = false;
+
+// Latest sensor values
+static float humidity = 0, temperature = 0, ppm = 0;
+static int soundState = LOW;
+
+// ====== Helpers ======
+int daysInMonth(int y, int m) {
+  switch (m) {
+    case 1: case 3: case 5: case 7: case 8: case 10: case 12: return 31;
+    case 4: case 6: case 9: case 11: return 30;
+    case 2: return ((y%4==0 && (y%100!=0 || y%400==0)) ? 29 : 28);
+  }
+  return 30;
+}
+
+void inDongHoLCD_BaseStatic() {
+  // Static separators and labels
+  lcd.setCursor(2,0); lcd.print(":");
+  lcd.setCursor(5,0); lcd.print(":");
+  lcd.setCursor(12,0); lcd.print("/");
+  lcd.setCursor(15,0); lcd.print("/");
+  lcd.setCursor(11,1); lcd.print("H:");
+  lcd.setCursor(0,2);  lcd.print("Gas:");
+  lcd.setCursor(0,3);  lcd.print("Alarm:");
+}
+
+void lcdWakeUpRedrawAll() {
+  // Turn on LCD fully and force a full redraw
+  lcd.display();
+  lcd.backlight();
+  lcd.clear();
+  inDongHoLCD_BaseStatic();
+
+  // Force redraw of dynamic fields
+  lastTemp = -999;
+  lastHum  = -999;
+  lastPpm  = -999;
+  lastSound = -1;
+  forceRedrawGas = true; // ensure ppm prints immediately if not editing
+}
+
+void moveNext() {
+  int oldSel = selected;
+  if (selected < 0) { selected = F_ALM_M; }
+  else { selected = (selected + 1) % F_COUNT; }
+  if (oldSel == F_GTH || selected == F_GTH) forceRedrawGas = true;
+}
+void movePrev() {
+  int oldSel = selected;
+  if (selected < 0) { selected = F_CLK_H; }
+  else { selected = (selected - 1 + F_COUNT) % F_COUNT; }
+  if (oldSel == F_GTH || selected == F_GTH) forceRedrawGas = true;
+}
+
+float readMQ135() {
+  int sensorValue = analogRead(PIN_MQ135);
+  float v = map(sensorValue, 0, 1023, 0, 500); // pseudo ppm from ADC
+  return v;
+}
+
+// ====== Draw helpers ======
+void drawClockField(Field f) {
+  char buf[3];
+  if (f == F_CLK_H) {
+    lcd.setCursor(0,0);
+    if (selected == F_CLK_H && !blinkOn) lcd.print("  ");
+    else { sprintf(buf,"%02d", gio); lcd.print(buf); }
+  } else if (f == F_CLK_M) {
+    lcd.setCursor(3,0);
+    if (selected == F_CLK_M && !blinkOn) lcd.print("  ");
+    else { sprintf(buf,"%02d", phut); lcd.print(buf); }
+  } else if (f == F_CLK_S) {
+    lcd.setCursor(6,0);
+    if (selected == F_CLK_S && !blinkOn) lcd.print("  ");
+    else { sprintf(buf,"%02d", giay); lcd.print(buf); }
+  }
+}
+
+void drawDateField(Field f) {
+  char buf2[5];
+  if (f == F_DATE_D) {
+    lcd.setCursor(10,0);
+    if (selected == F_DATE_D && !blinkOn) lcd.print("  ");
+    else { sprintf(buf2,"%02d", ngay); lcd.print(buf2); }
+  } else if (f == F_DATE_M) {
+    lcd.setCursor(13,0);
+    if (selected == F_DATE_M && !blinkOn) lcd.print("  ");
+    else { sprintf(buf2,"%02d", thang); lcd.print(buf2); }
+  } else if (f == F_DATE_Y) {
+    lcd.setCursor(16,0);
+    if (selected == F_DATE_Y && !blinkOn) lcd.print("    ");
+    else { char buf4[5]; sprintf(buf4,"%04d", nam); lcd.print(buf4); }
+  }
+}
+
+void drawThresholdField() {
+  // Line 1: "T:" at (0,1). When F_THR selected, show only threshold number blinking.
+  lcd.setCursor(0,1); lcd.print("T:");
+  if (selected == F_THR && !blinkOn) {
+    lcd.setCursor(3,1); lcd.print("     ");
+  } else if (selected == F_THR) {
+    lcd.setCursor(3,1); lcd.print(nguongNhiet, 1);
+  }
+}
+
+void drawGasField() {
+  // Line 2: "Gas:" at (0,2). When F_GTH selected, show threshold; else show ppm.
+  lcd.setCursor(0,2); lcd.print("Gas:");
+  if (selected == F_GTH && !blinkOn) {
+    lcd.setCursor(4,2); lcd.print("       ");
+  } else if (selected == F_GTH) {
+    lcd.setCursor(4,2); lcd.print(nguongGas, 0);
+  } else {
+    // Not selecting F_GTH: show ppm. Force redraw if needed.
+    if (forceRedrawGas || abs(ppm - lastPpm) > 1.0) {
+      lcd.setCursor(4,2); lcd.print("       ");
+      lcd.setCursor(4,2); lcd.print(ppm, 1);
+      lastPpm = ppm;
+      forceRedrawGas = false;
+    }
+  }
+}
+
+void drawAlarmField(Field f) {
+  char buf[3];
+  if (f == F_ALM_H) {
+    lcd.setCursor(6,3);
+    if (selected == F_ALM_H && !blinkOn) lcd.print("  ");
+    else { sprintf(buf,"%02d", alarmGio); lcd.print(buf); }
+  } else if (f == F_ALM_M) {
+    lcd.setCursor(9,3);
+    if (selected == F_ALM_M && !blinkOn) lcd.print("  ");
+    else { sprintf(buf,"%02d", alarmPhut); lcd.print(buf); }
+  }
+}
+
+void inBaoThucState() {
+  static int lastEN = -1;
+  if ((int)alarmEnabled != lastEN) {
+    lcd.setCursor(13,3);
+    if (alarmEnabled) lcd.print("ON ");
+    else              lcd.print("OFF");
+    lastEN = (int)alarmEnabled;
+  }
+}
+
+// ====== Clock update ======
+void capNhatDongHo() {
+  if (millis() - prevSecTick >= CLOCK_SPEED) {
+    prevSecTick += CLOCK_SPEED;
+    giay++;
+    if (giay >= 60) { giay = 0; phut++; }
+    if (phut >= 60) { phut = 0; gio++; }
+    if (gio >= 24) { gio = 0; ngay++; }
+    int nd = daysInMonth(nam, thang);
+    if (ngay > nd) { ngay = 1; thang++; }
+    if (thang > 12) { thang = 1; nam++; }
+
+    if (alarmEnabled && gio == alarmGio && phut == alarmPhut && giay == 0) {
+      alarmRinging = true;
+    }
+  }
+}
+
+// ====== Adjust helpers ======
+void tang(Field f) {
+  switch (f) {
+    case F_CLK_H: gio = (gio+1)%24; break;
+    case F_CLK_M: phut = (phut+1)%60; break;
+    case F_CLK_S: giay = (giay+1)%60; break;
+    case F_DATE_D: { int nd = daysInMonth(nam, thang); ngay++; if (ngay > nd) ngay = 1; } break;
+    case F_DATE_M: thang++; if (thang>12) thang=1; break;
+    case F_DATE_Y: nam++; if (nam>2099) nam=2000; break;
+    case F_THR:    nguongNhiet += NGUONG_NHIET_STEP; if (nguongNhiet>NGUONG_NHIET_MAX) nguongNhiet=NGUONG_NHIET_MAX; break;
+    case F_GTH:    nguongGas   += NGUONG_GAS_STEP;   if (nguongGas>NGUONG_GAS_MAX)     nguongGas  =NGUONG_GAS_MAX; break;
+    case F_ALM_H:  alarmGio = (alarmGio+1)%24; break;
+    case F_ALM_M:  alarmPhut = (alarmPhut+1)%60; break;
+    default: break;
+  }
+}
+void giam(Field f) {
+  switch (f) {
+    case F_CLK_H: gio = (gio+23)%24; break;
+    case F_CLK_M: phut = (phut+59)%60; break;
+    case F_CLK_S: giay = (giay+59)%60; break;
+    case F_DATE_D: { int nd = daysInMonth(nam, thang); ngay--; if (ngay < 1) ngay = nd; } break;
+    case F_DATE_M: thang--; if (thang<1) thang=12; break;
+    case F_DATE_Y: nam--; if (nam<2000) nam=2099; break;
+    case F_THR:    nguongNhiet -= NGUONG_NHIET_STEP; if (nguongNhiet<NGUONG_NHIET_MIN) nguongNhiet=NGUONG_NHIET_MIN; break;
+    case F_GTH:    nguongGas   -= NGUONG_GAS_STEP;   if (nguongGas  <NGUONG_GAS_MIN)   nguongGas  =NGUONG_GAS_MIN; break;
+    case F_ALM_H:  alarmGio = (alarmGio+23)%24; break;
+    case F_ALM_M:  alarmPhut = (alarmPhut+59)%60; break;
+    default: break;
+  }
+}
+
+// ====== Buttons (ĐÃ THÊM CHỨC NĂNG ĐÁNH THỨC LCD BẰNG D3/D4) ======
+void docNutDieuHuong() {
+  unsigned long now = millis();
+
+  // --- D4: NEXT ---
+  bool stLeft = digitalRead(BTN_LEFT);
+  if (stLeft == LOW && prevLeft == HIGH) {
+    // Nếu LCD đang tắt, lần bấm này chỉ để đánh thức màn hình
+    if (!lcdOn) {
+      lcdOn = true;
+      lcdWakeUpRedrawAll();
+      lastLcdActivity = now;
+      lastInteractionMs = now;
+      // Không di chuyển selection trong lần bấm đánh thức
+    } else {
+      moveNext();
+      lastInteractionMs = now;
+      lastLcdActivity = now;
+    }
+  }
+  prevLeft = stLeft;
+
+  // --- D3: PREV ---
+  bool stRight = digitalRead(BTN_RIGHT);
+  if (stRight == LOW && prevRight == HIGH) {
+    if (!lcdOn) {
+      lcdOn = true;
+      lcdWakeUpRedrawAll();
+      lastLcdActivity = now;
+      lastInteractionMs = now;
+    } else {
+      movePrev();
+      lastInteractionMs = now;
+      lastLcdActivity = now;
+    }
+  }
+  prevRight = stRight;
+
+  // --- D9: ADJUST (click tăng, hold giảm lặp) ---
+  bool stAdj = digitalRead(BTN_ADJ);
+  if (stAdj == LOW && prevAdj == HIGH) {
+    pressStartAdj = now; isHoldingAdj = false;
+    if (selected >= 0) tang((Field)selected);
+    lastRepeatAdj = now;
+    lastInteractionMs = now;
+    lastLcdActivity = now;
+  }
+  if (stAdj == LOW) {
+    if (now - pressStartAdj > HOLD_TIME) {
+      if (!isHoldingAdj) { isHoldingAdj = true; lastRepeatAdj = now; }
+      if (now - lastRepeatAdj > REPEAT_MS) {
+        if (selected >= 0) giam((Field)selected);
+        lastRepeatAdj = now;
+        lastInteractionMs = now;
+        lastLcdActivity = now;
+      }
+    }
+  }
+  prevAdj = stAdj;
+
+  // --- D11: STOP/MUTE/EXIT (nhấn ngắn) hoặc TOGGLE ALARM (giữ) ---
+  bool stStop = digitalRead(BTN_ALARM_STOP);
+  if (stStop == LOW && prevStop == HIGH) {
+    pressStartStop = now;
+    stopPressedTracking = true;
+    lastInteractionMs = now;
+    lastLcdActivity = now;
+  }
+  if (stStop == HIGH && prevStop == LOW && stopPressedTracking) {
+    unsigned long dur = now - pressStartStop;
+    stopPressedTracking = false;
+
+    if (dur >= HOLD_TIME) {
+      alarmEnabled = !alarmEnabled;
+      inBaoThucState();
+    } else {
+      if (alarmRinging) {
+        alarmRinging = false;
+      } else {
+        bool tempAlertNow = (temperature >= nguongNhiet);
+        bool gasAlertNow  = (ppm >= nguongGas);
+        bool canhBaoNow   = tempAlertNow || gasAlertNow;
+        if (canhBaoNow) {
+          alertMuted = true;
+          alertMuteUntil = now + ALERT_MUTE_MS;
+        } else if (selected >= 0) {
+          int oldSel = selected;
+          selected = -1;
+          if (oldSel == F_GTH) forceRedrawGas = true;
+        }
+      }
+    }
+    lastInteractionMs = now;
+    lastLcdActivity = now;
+  }
+  prevStop = stStop;
+
+  // --- Tự thoát chọn sau timeout ---
+  if (selected >= 0 && (now - lastInteractionMs >= SELECT_TIMEOUT)) {
+    if (selected == F_GTH) forceRedrawGas = true;
+    selected = -1;
+  }
+}
+
+// ====== LED blink ======
+void capNhatLEDNhapNhay(bool tempAlert, bool gasAlert) {
+  unsigned long now = millis();
+  if (now - lastLEDBlinkToggle >= 250) {
+    ledBlinkOn = !ledBlinkOn;
+    lastLEDBlinkToggle = now;
+  }
+  digitalWrite(LED_TEMP, tempAlert ? (ledBlinkOn ? HIGH : LOW) : LOW);
+  digitalWrite(LED_GAS,  gasAlert  ? (ledBlinkOn ? HIGH : LOW) : LOW);
+}
+
+// ====== Buzzer pattern for alarm ======
+void buzzerAlarmPattern() {
+  unsigned long ms = millis();
+  digitalWrite(BUZZER, ((ms/250)%2)==0 ? HIGH : LOW); // 4 Hz beep
+}
+
+void setup() {
+  Serial.begin(9600);
+  dht.begin();
+
+  Wire.begin();
+  lcd.init();
+  lcd.backlight();
+  lcd.display();
+
+  pinMode(BTN_RIGHT, INPUT_PULLUP);
+  pinMode(BTN_LEFT,  INPUT_PULLUP);
+  pinMode(BTN_ADJ,   INPUT_PULLUP);
+  pinMode(BTN_ALARM_STOP, INPUT_PULLUP);
+
+  pinMode(LED_TEMP, OUTPUT);
+  pinMode(LED_GAS,  OUTPUT);
+  pinMode(SOUND_SENSOR, INPUT);
+  pinMode(LED_SOUND, OUTPUT);
+  pinMode(BUZZER, OUTPUT);
+  digitalWrite(BUZZER, LOW);
+
+  delay(100);
+  lcd.clear();
+
+  inDongHoLCD_BaseStatic();
+  lcd.setCursor(0,2);  lcd.print("Gas:");
+  lcd.setCursor(0,3);  lcd.print("Alarm:");
+  inBaoThucState();
+
+  lastInteractionMs = millis();
+  lastLcdActivity = millis();
+}
+
+void loop() {
+  unsigned long now = millis();
+
+  // UI blink
+  if (now - lastUIBlinkToggle >= 400) {
+    blinkOn = !blinkOn;
+    lastUIBlinkToggle = now;
+  }
+
+  capNhatDongHo();
+  docNutDieuHuong();
+
+  // read sensors
+  if (now - lastSensorRead >= SENSOR_INTERVAL) {
+    lastSensorRead = now;
+    humidity = dht.readHumidity();
+    temperature = dht.readTemperature();
+    ppm = readMQ135();
+    int s = digitalRead(SOUND_SENSOR);
+    if (s == HIGH) { lastLcdActivity = now; } // sound wakes LCD
+    soundState = s;
+  }
+
+  // auto un-mute when timeout reached
+  if (alertMuted && (long)(millis() - alertMuteUntil) >= 0) {
+    alertMuted = false;
+  }
+
+  // ====== LCD auto control (off = noDisplay + noBacklight) ======
+  bool eventActive = alarmRinging || (temperature >= nguongNhiet) || (ppm >= nguongGas);
+
+  // If any event active, wake LCD and refresh timer
+  if (eventActive || soundState == HIGH) {
+    lastLcdActivity = now;
+    if (!lcdOn) {
+      lcdOn = true;
+      lcdWakeUpRedrawAll();
+    }
+  }
+
+  // Turn off LCD after timeout (no event)
+  if (lcdOn && !eventActive && (now - lastLcdActivity >= LCD_TIMEOUT)) {
+    lcdOn = false;
+    lcd.noDisplay();
+    lcd.noBacklight();
+  }
+
+  // ====== Draw only when LCD is ON ======
+  if (lcdOn) {
+    // draw time/date
+    drawClockField(F_CLK_H);
+    drawClockField(F_CLK_M);
+    drawClockField(F_CLK_S);
+    drawDateField(F_DATE_D);
+    drawDateField(F_DATE_M);
+    drawDateField(F_DATE_Y);
+
+    // draw temp/hum
+    drawThresholdField();
+    if (!(selected == F_THR && !blinkOn)) {
+      if (abs(temperature - lastTemp) > 0.1 || selected != F_THR) {
+        lcd.setCursor(3,1); lcd.print("     ");
+        if (selected == F_THR) {
+          lcd.setCursor(3,1); lcd.print(nguongNhiet,1); lcd.print((char)223); lcd.print("C");
+        } else {
+          lcd.setCursor(3,1); lcd.print(temperature,1); lcd.print((char)223); lcd.print("C");
+          lastTemp = temperature;
+        }
+      }
+      if (abs(humidity - lastHum) > 1.0) {
+        lcd.setCursor(13,1); lcd.print("      ");
+        lcd.setCursor(13,1); lcd.print(humidity,0); lcd.print("%");
+        lastHum = humidity;
+      }
+    }
+
+    // draw gas field (ppm or threshold)
+    drawGasField();
+
+    // right side of line 2: sound or MUTE
+    lcd.setCursor(13, 2);
+    if (alertMuted) {
+      lcd.print("MUTE");
+    } else {
+      if (soundState != lastSound) {
+        if (soundState == HIGH) lcd.print("DETECT");
+        else                    lcd.print("Quiet ");
+        lastSound = soundState;
+      }
+    }
+
+    // alarm time and state
+    drawAlarmField(F_ALM_H);
+    drawAlarmField(F_ALM_M);
+    inBaoThucState();
+  }
+
+  // alerts and buzzer (always active even if LCD off)
+  bool tempAlert = (temperature >= nguongNhiet);
+  bool gasAlert  = (ppm >= nguongGas);
+  bool canhBao   = tempAlert || gasAlert;
+
+  capNhatLEDNhapNhay(tempAlert, gasAlert);
+
+  if (alarmRinging) {
+    buzzerAlarmPattern();
+  } else if (canhBao && !alertMuted) {
+    digitalWrite(BUZZER, HIGH);
+  } else {
+    digitalWrite(BUZZER, LOW);
+  }
+
+  if (!canhBao) alertMuted = false;
+
+  // track selection change
+  if (lastSelected != selected) {
+    if (lastSelected == F_GTH || selected == F_GTH) forceRedrawGas = true;
+    lastSelected = selected;
+  }
+}
